@@ -1,10 +1,8 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime, date
 import os
-import io
 import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="Plano de Quitação de Dívidas", layout="wide")
@@ -27,11 +25,9 @@ def save_csv(df, path):
     df.to_csv(path, index=False)
 
 def compute_competencia(today: date, base_day: int = 20) -> str:
-    # "Competência" vira o mês corrente se hoje >= base_day, senão mês anterior
     y = today.year
     m = today.month
     if today.day < base_day:
-        # ir para mês anterior
         if m == 1:
             y -= 1
             m = 12
@@ -39,16 +35,10 @@ def compute_competencia(today: date, base_day: int = 20) -> str:
             m -= 1
     return f"{y:04d}-{m:02d}"
 
-def months_label_to_firstday(label: str) -> date:
-    y, m = map(int, label.split("-"))
-    return date(y, m, 1)
-
 # ---------------- Defaults ----------------
 DEFAULT_INPC_2025 = 4.7
 BASE_DAY = 20
-BASE_START_YEAR = 2025
-BASE_START_MONTH = 9  # próxima competência completa após agosto/2025
-BASE_START = datetime(BASE_START_YEAR, BASE_START_MONTH, BASE_DAY)
+BASE_START = datetime(2025, 9, BASE_DAY)
 
 default_debts = pd.DataFrame([
     {"id":"CX-6481-47","nome":"Consignado Caixa — 03.3395.110.0006481-47","tipo":"Consignado PRICE","saldo_atual":12368.49,"parcela":234.63,"juros_aa":12.55,"indexador":"","spread_aa":0.0,"prioridade":2},
@@ -75,8 +65,13 @@ horizonte_meses = st.sidebar.slider("Horizonte (meses)", min_value=12, max_value
 st.sidebar.write("—")
 st.sidebar.subheader("Salvar/Carregar Dados")
 if st.sidebar.button("Salvar dívidas"):
-    save_csv(dividas_df, "dividas.csv")
-    st.sidebar.success("Dívidas salvas em dividas.csv")
+    try:
+        # salva o que está na UI (editado), não o snapshot antigo
+        save_csv(st.session_state.get("dividas_edit", dividas_df), "dividas.csv")
+        st.session_state["dividas_df"] = st.session_state.get("dividas_edit", dividas_df).copy()
+        st.sidebar.success("Dívidas salvas em dividas.csv")
+    except Exception as e:
+        st.sidebar.error(f"Erro ao salvar dívidas: {e}")
 
 uploaded = st.sidebar.file_uploader("Carregar dívidas (CSV)", type=["csv"])
 if uploaded is not None:
@@ -106,6 +101,7 @@ dividas_edit = st.data_editor(
     },
     hide_index=True
 )
+st.session_state["dividas_edit"] = dividas_edit.copy()
 
 # ---------------- 2) Aportes mensais ----------------
 st.markdown("### 2) Aportes mensais (editáveis e salváveis)")
@@ -134,12 +130,18 @@ with c2:
             start = 1 if aportes_df.empty else int(aportes_df["mes"].max())+1
             extra = pd.DataFrame({"mes": list(range(start, start+int(meses_novos))), "aporte": [float(aporte_default)]*int(meses_novos)})
             aportes_df = pd.concat([aportes_df, extra], ignore_index=True)
-with c3:
-    if st.button("Salvar aportes"):
-        save_csv(aportes_df, "aportes.csv")
-        st.success("Aportes salvos em aportes.csv")
 
 aportes_edit = st.data_editor(aportes_df, num_rows="dynamic", use_container_width=True, hide_index=True)
+st.session_state["aportes_edit"] = aportes_edit.copy()
+
+with c3:
+    if st.button("Salvar aportes"):
+        try:
+            save_csv(aportes_edit, "aportes.csv")
+            st.session_state["aportes_df"] = aportes_edit.copy()
+            st.success("Aportes salvos em aportes.csv")
+        except Exception as e:
+            st.error(f"Erro ao salvar aportes: {e}")
 
 # ---------------- 3) Simulação principal ----------------
 st.markdown("### 3) Rodar simulação")
@@ -233,7 +235,7 @@ def simulate(debts_df, aportes_df, months, base_date):
 
 if st.button("Rodar simulação"):
     debts_prepared = prepare_debts(dividas_edit, inpc_aa)
-    timeline_df, payoff_df, final_debts = simulate(debts_prepared, aportes_edit, horizonte_meses, BASE_START)
+    timeline_df, payoff_df, final_debts = simulate(debts_prepared, st.session_state["aportes_edit"], horizonte_meses, BASE_START)
 
     st.success("Simulação concluída.")
     c1, c2 = st.columns([1,1])
@@ -288,7 +290,6 @@ if "pagamentos_df" not in st.session_state:
 
 pag_df = st.session_state["pagamentos_df"].copy()
 
-# construir status da competência atual
 base = pd.DataFrame({"id": dividas_edit["id"], "nome": dividas_edit["nome"], "parcela": dividas_edit["parcela"]})
 reg = pag_df[pag_df["competencia"] == competencia].copy()
 status = base.merge(reg, how="left", on="id")
@@ -312,7 +313,6 @@ status_edit = st.data_editor(
 col_s1, col_s2, col_s3 = st.columns([1,1,1])
 with col_s1:
     if st.button("Salvar checklist do mês"):
-        # Atualizar/mesclar com pag_df
         other = pag_df[pag_df["competencia"] != competencia]
         tosave = status_edit[["competencia","id","pago","data_pagamento"]].copy()
         st.session_state["pagamentos_df"] = pd.concat([other, tosave], ignore_index=True)
@@ -325,7 +325,6 @@ with col_s2:
         save_csv(st.session_state["pagamentos_df"], pagamentos_path)
         st.success(f"Todas as parcelas marcadas como pagas para {competencia}.")
 with col_s3:
-    # resumo
     pend = status_edit[~status_edit["pago"]]["parcela"].sum()
     st.metric("Total pendente (mínimos) nesta competência", f"R$ {pend:,.2f}".replace(",", "X").replace(".", ",").replace("X","."))
 
@@ -344,11 +343,13 @@ with colx3:
 def make_aportes_constantes(v, n):
     return pd.DataFrame({"mes": list(range(1, int(n)+1)), "aporte": [float(v)]*int(n)})
 
-def run_and_summarize(dividas, aporte_const, inpc):
-    debts = prepare_debts(dividas, inpc)
+def prepare_debts_local():
+    return st.session_state.get("dividas_edit", dividas_df).copy()
+
+def run_and_summarize(dividas_local, aporte_const, inpc):
+    debts = prepare_debts(dividas_local, inpc)
     ap = make_aportes_constantes(aporte_const, meses_cmp)
     timeline, payoff, _ = simulate(debts, ap, meses_cmp, BASE_START)
-    # identificar mês de quitação total
     meses_quit = int(timeline["mes"].iloc[-1])
     saldo_final = float(timeline["saldo_total"].iloc[-1])
     quitou = saldo_final <= 0.01
@@ -361,8 +362,9 @@ def run_and_summarize(dividas, aporte_const, inpc):
     }
 
 if st.button("Comparar cenários"):
-    resA = run_and_summarize(dividas_edit, aporte_A, inpc_A)
-    resB = run_and_summarize(dividas_edit, aporte_B, inpc_B)
+    div_local = prepare_debts_local()
+    resA = run_and_summarize(div_local, aporte_A, inpc_A)
+    resB = run_and_summarize(div_local, aporte_B, inpc_B)
 
     colr1, colr2 = st.columns([1,1])
     with colr1:
@@ -384,7 +386,6 @@ if st.button("Comparar cenários"):
     axc.legend()
     st.pyplot(figc)
 
-    # Export
     with pd.ExcelWriter("comparacao_cenarios.xlsx", engine="xlsxwriter") as writer:
         resA["timeline"].to_excel(writer, index=False, sheet_name="A_timeline")
         resA["payoff"].to_excel(writer, index=False, sheet_name="A_quitacao")
@@ -392,67 +393,23 @@ if st.button("Comparar cenários"):
         resB["payoff"].to_excel(writer, index=False, sheet_name="B_quitacao")
     st.markdown("[Baixar planilha de comparação (XLSX)](comparacao_cenarios.xlsx)")
 
-st.markdown("---")
-st.markdown("**Dicas:** Ajuste as **prioridades**, edite o **INPC** para FUNCEF Variável e registre os pagamentos no **Checklist** mensal.")
-
-
 # ---------------- 6) Visão do mês (dashboard rápido) ----------------
 st.markdown("### 6) Visão do mês (dashboard rápido)")
-
-# Recarrega dados necessários (dividas_edit, aportes_edit e pagamentos_df devem existir no estado)
 try:
-    _div = dividas_edit.copy()
-    _apo = aportes_edit.copy()
-except Exception as _e:
-    st.info("Edite suas dívidas e aportes acima para habilitar a 'Visão do mês'.")
-    _div, _apo = None, None
-
-# Funções auxiliares locais (espelham as de cima)
-def _compute_competencia(today: date, base_day: int = BASE_DAY) -> str:
-    y = today.year
-    m = today.month
-    if today.day < base_day:
-        if m == 1:
-            y -= 1
-            m = 12
-        else:
-            m -= 1
-    return f"{y:04d}-{m:02d}"
-
-if _div is not None and _apo is not None:
-    competencia_dash = _compute_competencia(date.today(), BASE_DAY)
-
+    _div = st.session_state["dividas_edit"].copy()
+    _apo = st.session_state["aportes_edit"].copy()
+    competencia_dash = compute_competencia(date.today(), BASE_DAY)
     st.caption(f"Competência atual (base dia {BASE_DAY}): **{competencia_dash}**")
-
-    # Totais mínimos do mês (somatório das parcelas de dívidas com saldo > 0)
     total_minimos = float(_div.loc[_div["saldo_atual"] > 0, "parcela"].sum())
-
-    # Aporte do mês conforme tabela de aportes (se existir registro, senão 0)
+    aporte_mes = float(_apo.loc[_apo["mes"] == 1, "aporte"].sum()) if "mes" in _apo.columns else 0.0
     try:
-        mes_num = 1  # por padrão, primeiro mês do horizonte; usuário pode decidir que 1 = competência atual
-        # Se já existir 'mes' com valor 1, somamos o aporte desse registro
-        aporte_mes = float(_apo.loc[_apo["mes"] == mes_num, "aporte"].sum())
-    except Exception:
-        aporte_mes = 0.0
-
-    # Carregar ou obter dataframe de pagamentos
-    try:
-        if "pagamentos_df" in st.session_state and isinstance(st.session_state["pagamentos_df"], pd.DataFrame):
-            _pag = st.session_state["pagamentos_df"].copy()
-        else:
-            _pag = pd.read_csv("pagamentos.csv")
+        _pag = pd.read_csv("pagamentos.csv")
     except Exception:
         _pag = pd.DataFrame(columns=["competencia","id","pago","data_pagamento"])
-
-    # Total pago nos mínimos da competência
     base_comp = _div[["id", "parcela"]].copy()
-    pagos_comp = _pag[_pag["competencia"] == competencia_dash].copy()
-    pagos_comp = pagos_comp.merge(base_comp, on="id", how="left")
+    pagos_comp = _pag[_pag["competencia"] == competencia_dash].copy().merge(base_comp, on="id", how="left")
     total_pago_mes = float(pagos_comp.loc[pagos_comp["pago"] == True, "parcela"].sum())
-
     pendente_mes = max(0.0, total_minimos - total_pago_mes)
-
-    # % do orçamento liberado (parcelas de dívidas já quitadas vs total original)
     total_parcelas_original = float(_div["parcela"].sum())
     parcelas_ativas = float(_div.loc[_div["saldo_atual"] > 0, "parcela"].sum())
     liberado = max(0.0, total_parcelas_original - parcelas_ativas)
@@ -465,8 +422,6 @@ if _div is not None and _apo is not None:
     colv4.metric("Pendente (mínimos)", f"R$ {pendente_mes:,.2f}".replace(",", "X").replace(".", ",").replace("X","."))
     colv5.metric("% orçamento liberado", f"{perc_liberado:.1f}%")
 
-    # Pequeno gráfico de barras para visualização Pago x Pendente x Aporte
-    import matplotlib.pyplot as plt
     figv, axv = plt.subplots()
     labels = ["Pago", "Pendente", "Aporte"]
     valores = [total_pago_mes, pendente_mes, aporte_mes]
@@ -474,31 +429,27 @@ if _div is not None and _apo is not None:
     axv.set_ylabel("R$")
     axv.set_title("Resumo do mês")
     st.pyplot(figv)
+except Exception as e:
+    st.info("Edite suas dívidas e aportes acima para habilitar a 'Visão do mês'.")
 
 # ---------------- 7) Tickar parcelas pagas agora (atalho) ----------------
 st.markdown("### 7) Tickar parcelas pagas agora (atalho)")
-
 try:
-    comp_quick = _compute_competencia(date.today(), BASE_DAY)
+    comp_quick = compute_competencia(date.today(), BASE_DAY)
     st.caption(f"Competência sugerida: **{comp_quick}**")
-    # Reaproveita a lógica do Checklist: monta status da competência
-    if "pagamentos_df" not in st.session_state:
-        # tenta carregar
-        try:
-            st.session_state["pagamentos_df"] = pd.read_csv("pagamentos.csv")
-        except Exception:
-            st.session_state["pagamentos_df"] = pd.DataFrame(columns=["competencia","id","pago","data_pagamento"])
+    try:
+        pag_quick = pd.read_csv("pagamentos.csv")
+    except Exception:
+        pag_quick = pd.DataFrame(columns=["competencia","id","pago","data_pagamento"])
 
-    pag_df_quick = st.session_state["pagamentos_df"].copy()
     base_quick = pd.DataFrame({"id": dividas_edit["id"], "nome": dividas_edit["nome"], "parcela": dividas_edit["parcela"]})
-    reg_quick = pag_df_quick[pag_df_quick["competencia"] == comp_quick].copy()
+    reg_quick = pag_quick[pag_quick["competencia"] == comp_quick].copy()
     status_quick = base_quick.merge(reg_quick, how="left", on="id")
     status_quick["competencia"] = comp_quick
     status_quick["pago"] = status_quick["pago"].fillna(False)
     status_quick["data_pagamento"] = status_quick["data_pagamento"].fillna("")
     status_quick = status_quick[["competencia","id","nome","parcela","pago","data_pagamento"]]
 
-    st.write("Marque rapidamente as parcelas **pagas hoje** e salve:")
     quick_edit = st.data_editor(
         status_quick,
         use_container_width=True,
@@ -513,14 +464,13 @@ try:
     qc1, qc2 = st.columns([1,1])
     with qc1:
         if st.button("Salvar agora (atalho)"):
-            other = pag_df_quick[pag_df_quick["competencia"] != comp_quick]
+            other = pag_quick[pag_quick["competencia"] != comp_quick]
             tosave = quick_edit[["competencia","id","pago","data_pagamento"]].copy()
-            st.session_state["pagamentos_df"] = pd.concat([other, tosave], ignore_index=True)
-            st.session_state["pagamentos_df"].to_csv("pagamentos.csv", index=False)
+            new_df = pd.concat([other, tosave], ignore_index=True)
+            new_df.to_csv("pagamentos.csv", index=False)
             st.success(f"Pagamentos salvos para {comp_quick}.")
     with qc2:
         pend_q = quick_edit[~quick_edit["pago"]]["parcela"].sum()
         st.metric("Pendente após marcação", f"R$ {pend_q:,.2f}".replace(",", "X").replace(".", ",").replace("X","."))
 except Exception as e:
     st.info("Preencha as dívidas acima para habilitar o atalho de marcação rápida.")
-
