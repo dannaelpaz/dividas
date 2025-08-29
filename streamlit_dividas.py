@@ -124,21 +124,19 @@ c1, c2, c3 = st.columns([1,1,1])
 with c1:
     if st.button("Aplicar valor padrão aos meses existentes"):
         aportes_df["aporte"] = float(aporte_default)
+        st.session_state["aportes_df"] = aportes_df.copy()  # <-- Adicione esta linha
 with c2:
     if st.button("Adicionar meses futuros"):
         if meses_novos > 0:
             start = 1 if aportes_df.empty else int(aportes_df["mes"].max())+1
             extra = pd.DataFrame({"mes": list(range(start, start+int(meses_novos))), "aporte": [float(aporte_default)]*int(meses_novos)})
             aportes_df = pd.concat([aportes_df, extra], ignore_index=True)
-
-aportes_edit = st.data_editor(aportes_df, num_rows="dynamic", use_container_width=True, hide_index=True)
-st.session_state["aportes_edit"] = aportes_edit.copy()
-
+            st.session_state["aportes_df"] = aportes_df.copy()  # <-- Adicione esta linha
 with c3:
     if st.button("Salvar aportes"):
         try:
-            save_csv(aportes_edit, "aportes.csv")
-            st.session_state["aportes_df"] = aportes_edit.copy()
+            save_csv(aportes_df, "aportes.csv")
+            st.session_state["aportes_df"] = aportes_df.copy()
             st.success("Aportes salvos em aportes.csv")
         except Exception as e:
             st.error(f"Erro ao salvar aportes: {e}")
@@ -171,7 +169,7 @@ def simulate(debts_df, aportes_df, months, base_date):
     debts = debts_df.copy()
     aportes = aportes_df.set_index("mes")["aporte"].to_dict()
     records = []
-    payoff = {row["id"]: None for _, row in debts.iterrows()}
+    payoff = {row["id"]: pd.NaT for _, row in debts.iterrows()}  # Initialize with NaT (Not a Timestamp)
     snowball_extra = 0.0
     for m in range(1, months+1):
         date = pd.Timestamp(base_date) + pd.DateOffset(months=m-1)
@@ -208,7 +206,7 @@ def simulate(debts_df, aportes_df, months, base_date):
         newly_freed = 0.0
         for idx in debts.index:
             if debts.at[idx, "saldo"] <= 0.0 and payoff[debts.at[idx, "id"]] is None:
-                payoff[debts.at[idx, "id"]] = date
+                payoff[debts.at[idx, "id"]] = pd.Timestamp(date)  # Ensure it's explicitly a Timestamp
                 newly_freed += debts.at[idx, "parcela"]
 
         snowball_extra += newly_freed
@@ -228,7 +226,7 @@ def simulate(debts_df, aportes_df, months, base_date):
 
     timeline = pd.DataFrame(records)
     payoff_df = pd.DataFrame([
-        {"id": d["id"], "nome": d["nome"], "quitado_em": payoff[d["id"]].date().isoformat() if payoff[d["id"]] is not None else None}
+        {"id": d["id"], "nome": d["nome"], "quitado_em": payoff[d["id"]].date().isoformat() if isinstance(payoff[d["id"]], pd.Timestamp) and not pd.isna(payoff[d["id"]]) else None}
         for _, d in debts_df.iterrows()
     ])
     return timeline, payoff_df, debts
